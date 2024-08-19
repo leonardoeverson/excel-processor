@@ -2,28 +2,25 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/tidwall/gjson"
 	"github.com/xuri/excelize/v2"
 	"gopkg.in/gomail.v2"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"strconv"
-	"strings"
-	"time"
 )
-
-type PostBody struct {
-	values   string
-	mailaddr []string
-}
 
 func mailHandler(to []string, filePath string) {
 	message := gomail.NewMessage()
-	message.SetHeader("From", os.Getenv("MAIL_FROM"))
+	message.SetHeader("From", os.Getenv("MAIL_FROM_ADDRESS"))
 	message.SetHeader("To", to...)
 	message.SetHeader("Subject", "Relatório")
 	message.SetBody("text/html", "Segue em anexo o relatório solicitado")
@@ -33,7 +30,7 @@ func mailHandler(to []string, filePath string) {
 	}
 
 	port, _ := strconv.Atoi(os.Getenv("MAIL_PORT"))
-	dialer := gomail.NewDialer(os.Getenv("MAIL_HOST"), port, os.Getenv("MAIL_USER"), os.Getenv("MAIL_PASS"))
+	dialer := gomail.NewDialer(os.Getenv("MAIL_HOST"), port, os.Getenv("MAIL_USERNAME"), os.Getenv("MAIL_PASSWORD"))
 
 	if err := dialer.DialAndSend(message); err != nil {
 		log.Fatal(err)
@@ -75,10 +72,10 @@ func socketHandler(writer http.ResponseWriter, request *http.Request) (filename 
 }
 
 func sheetWriter(jsonStr gjson.Result) (filename string, err error) {
-	file := excelize.NewFile()
+	sheet := excelize.NewFile()
 
 	defer func() {
-		if err := file.Close(); err != nil {
+		if err := sheet.Close(); err != nil {
 			fmt.Println(err)
 		}
 	}()
@@ -89,35 +86,47 @@ func sheetWriter(jsonStr gjson.Result) (filename string, err error) {
 
 	vertical := 2
 
-	gjson.Parse(jsonStr.Str).ForEach(func(key, value gjson.Result) bool {
-		horizontal := 0
+	gjson.Parse(jsonStr.String()).ForEach(func(key, value gjson.Result) bool {
+		horizontal, horizontalIdx2 := 0, 0
 
 		gjson.Parse(value.String()).ForEach(func(key, value gjson.Result) bool {
-			if vertical == 2 {
-				_ = file.SetCellValue("Sheet1", strings.Join([]string{alfabeto[horizontal], strconv.Itoa(1)}, ""), key)
+			column := ""
+			if horizontal < 26 {
+				column = fmt.Sprintf("%s%d", alfabeto[horizontal], vertical)
+			} else {
+				column = fmt.Sprintf("%s%s%d", alfabeto[horizontalIdx2], alfabeto[horizontal%26], vertical)
 			}
 
-			column := strings.Join([]string{alfabeto[horizontal], strconv.Itoa(vertical)}, "")
+			if vertical == 2 {
+				regex := regexp.MustCompile("[0-9]+")
+				regexSearch := regex.ReplaceAllString(column, "")
+				header := fmt.Sprintf("%s%d", regexSearch, 1)
+				_ = sheet.SetCellValue("Sheet1", header, key.String())
+			}
 
 			flt, floatErr := strconv.ParseFloat(value.Str, 64)
 			date, dateErr := time.Parse("2006-01-02", value.Str)
 			datetime, dateTimeErr := time.Parse("2006-01-01 14:14:32", value.Str)
 
 			if floatErr == nil && len(value.String()) < 11 {
-				_ = file.SetCellValue("Sheet1", column, flt)
-			} else if dateTimeErr != nil {
-				_ = file.SetCellValue("Sheet1", column, datetime.Format("02/01/2006 14:14:32"))
+				_ = sheet.SetCellValue("Sheet1", column, flt)
+			} else if dateTimeErr == nil {
+				_ = sheet.SetCellValue("Sheet1", column, datetime.Format("02/01/2006 14:14:32"))
 			} else if dateErr == nil {
-				_ = file.SetCellValue("Sheet1", column, date.Format("02/01/2006"))
+				_ = sheet.SetCellValue("Sheet1", column, date.Format("02/01/2006"))
 			} else if value.Type == gjson.String {
-				_ = file.SetCellValue("Sheet1", column, value.Str)
+				_ = sheet.SetCellValue("Sheet1", column, value.Str)
 			} else if value.Type == gjson.Number {
-				_ = file.SetCellValue("Sheet1", column, value.Num)
+				_ = sheet.SetCellValue("Sheet1", column, value.Num)
 			} else {
-				_ = file.SetCellValue("Sheet1", column, value)
+				_ = sheet.SetCellValue("Sheet1", column, value)
 			}
 
 			horizontal++
+			if horizontal%26 == 0 {
+				horizontalIdx2++
+			}
+
 			return true
 		})
 
@@ -128,7 +137,7 @@ func sheetWriter(jsonStr gjson.Result) (filename string, err error) {
 	uuidInfo, _ := uuid.NewUUID()
 	fileName := uuidInfo.String() + ".xlsx"
 
-	err = file.SaveAs(fileName)
+	err = sheet.SaveAs(fileName)
 	if err != nil {
 		return "", err
 	}
@@ -148,6 +157,10 @@ func main() {
 		filename, mailAddr := socketHandler(writer, request)
 		if filename != "" {
 			mailHandler(mailAddr, filename)
+			err := os.Remove(filename)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 	})
 
@@ -156,4 +169,6 @@ func main() {
 		log.Fatal("Erro ao iniciar o servidor na porta 8081")
 		return
 	}
+
+	fmt.Println("Servidor iniciado")
 }
