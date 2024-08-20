@@ -18,15 +18,20 @@ import (
 	"gopkg.in/gomail.v2"
 )
 
-func mailHandler(to []string, filePath string) {
+type Item struct {
+	file     string
+	mailaddr []string
+}
+
+func mailHandler(params *Item) {
 	message := gomail.NewMessage()
 	message.SetHeader("From", os.Getenv("MAIL_FROM_ADDRESS"))
-	message.SetHeader("To", to...)
+	message.SetHeader("To", params.mailaddr...)
 	message.SetHeader("Subject", "Relatório")
 	message.SetBody("text/html", "Segue em anexo o relatório solicitado")
 
-	if filePath != "" {
-		message.Attach(filePath)
+	if params.file != "" {
+		message.Attach(params.file)
 	}
 
 	port, _ := strconv.Atoi(os.Getenv("MAIL_PORT"))
@@ -37,7 +42,7 @@ func mailHandler(to []string, filePath string) {
 	}
 }
 
-func socketHandler(writer http.ResponseWriter, request *http.Request) (filename string, mailaddr []string) {
+func socketHandler(writer http.ResponseWriter, request *http.Request) *Item {
 	buf := new(strings.Builder)
 	_, err := io.Copy(buf, request.Body)
 	if err != nil {
@@ -64,11 +69,11 @@ func socketHandler(writer http.ResponseWriter, request *http.Request) (filename 
 	if fileNameErr != nil {
 		_, err := writer.Write([]byte(fileNameErr.Error()))
 		if err != nil {
-			return "", nil
+			return &Item{"", nil}
 		}
 	}
 
-	return fileName, mailAddr
+	return &Item{fileName, mailAddr}
 }
 
 func sheetWriter(jsonStr gjson.Result) (filename string, err error) {
@@ -123,7 +128,7 @@ func sheetWriter(jsonStr gjson.Result) (filename string, err error) {
 			}
 
 			horizontal++
-			if horizontal%26 == 0 {
+			if horizontal%26 == 0 && horizontal >= 52 {
 				horizontalIdx2++
 			}
 
@@ -153,11 +158,15 @@ func main() {
 
 	fmt.Println("Iniciando servidor na porta 8081")
 
-	http.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
-		filename, mailAddr := socketHandler(writer, request)
-		if filename != "" {
-			mailHandler(mailAddr, filename)
-			err := os.Remove(filename)
+	go http.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+		fmt.Println("Conexão recebida: ", request.RemoteAddr)
+		item := socketHandler(writer, request)
+		if item.mailaddr != nil {
+			mailHandler(item)
+		}
+
+		if item.file != "" {
+			err := os.Remove(item.file)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -169,6 +178,4 @@ func main() {
 		log.Fatal("Erro ao iniciar o servidor na porta 8081")
 		return
 	}
-
-	fmt.Println("Servidor iniciado")
 }
